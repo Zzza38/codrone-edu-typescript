@@ -1,0 +1,35 @@
+{
+  "name": "codrone-edu-typescript",
+  "version": "0.1.0",
+  "description": "Browser TypeScript Web Serial API for CoDrone EDU drones.",
+  "type": "module",
+  "packageManager": "pnpm@10.33.2",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "check": "tsc -p tsconfig.json --noEmit",
+    "test": "pnpm run build && node test/packet.test.mjs"
+  },
+  "keywords": [
+    "codrone",
+    "codrone-edu",
+    "drone",
+    "web-serial",
+    "typescript"
+  ],
+  "license": "MIT",
+  "devDependencies": {
+    "typescript": "^5.9.3"
+  }
+}
