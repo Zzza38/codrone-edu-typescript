@@ -1,0 +1,807 @@
+# CoDrone EDU serial protocol notes for browser TypeScript
+
+Rebuilt with raw motor control marked as low-level motor output, not diagnostic-only. Generated from the public `codrone-edu` Python package **v2.8**. I extracted the PyPI wheel and inspected `codrone_edu/drone.py`, `protocol.py`, `system.py`, and `crc.py`. No hardware was attached here, so treat this as a source-derived protocol map, not a live-tested SDK. Because apparently drones need receipts now.
+
+## Safety / sanity note
+
+The library exposes raw motor packets (`sendMotor`, `sendMotorSingle`, and `set_motor_speed`) as **real low-level motor output commands**, not merely diagnostics. They can set per-motor output values directly through the serial protocol. However, these packets do **not** include stabilization, altitude hold, angle correction, or safety mixing. If you use them for hover experiments, you must build the stabilization layer yourself using sensor feedback and should start with very low values, a restrained/clear test area, and an immediate stop/land path. Physics remains irritatingly non-optional.
+
+## Browser/USB assumptions
+
+The Python library opens the controller as a serial port at **57600 baud** and auto-detects VID **1155**. In a browser you would use Web Serial and select the controller manually.
+
+```ts
+await port.open({ baudRate: 57600 });
+```
+
+## Packet format
+
+Every outbound packet built by `makeTransferDataArray(header, data)` has this shape:
+
+| Offset | Size | Meaning |
+|---:|---:|---|
+| 0 | 1 | Start byte `0x0A` |
+| 1 | 1 | Start byte `0x55` |
+| 2 | 1 | `dataType` |
+| 3 | 1 | payload length in bytes |
+| 4 | 1 | `from` device type, usually `0x70` = Base |
+| 5 | 1 | `to` device type |
+| 6..N | variable | payload |
+| last-2 | 2 | CRC16, little-endian |
+
+CRC is calculated over **header + payload only**, not the `0A 55` start bytes. The Python uses CRC-16 with polynomial `0x1021`, initial value `0x0000`, then appends it as little-endian `u16`.
+
+## Minimal TypeScript packet builder
+
+```ts
+const START = [0x0a, 0x55] as const;
+
+function crc16CcittInitial0(bytes: Uint8Array): number {
+  let crc = 0;
+
+  for (const byte of bytes) {
+    crc ^= byte << 8;
+    for (let i = 0; i < 8; i++) {
+      crc = (crc & 0x8000) !== 0
+        ? ((crc << 1) ^ 0x1021) & 0xffff
+        : (crc << 1) & 0xffff;
+    }
+  }
+
+  return crc & 0xffff;
+}
+
+function packet(dataType: number, to: number, payload: number[], from = 0x70): Uint8Array {
+  const header = new Uint8Array([dataType, payload.length, from, to]);
+  const body = new Uint8Array([...header, ...payload]);
+  const crc = crc16CcittInitial0(body);
+
+  return new Uint8Array([
+    ...START,
+    ...body,
+    crc & 0xff,
+    (crc >> 8) & 0xff,
+  ]);
+}
+
+function i8(n: number): number {
+  return n < 0 ? 256 + n : n;
+}
+
+function u16le(n: number): number[] {
+  return [n & 0xff, (n >> 8) & 0xff];
+}
+
+function i16le(n: number): number[] {
+  return u16le(n & 0xffff);
+}
+
+function f32le(n: number): number[] {
+  const b = new ArrayBuffer(4);
+  new DataView(b).setFloat32(0, n, true);
+  return [...new Uint8Array(b)];
+}
+```
+
+## DeviceType enum
+
+| Name | Hex | Dec |
+|---|---:|---:|
+| `None_` | `0x00` | `0` |
+| `Drone` | `0x10` | `16` |
+| `Controller` | `0x20` | `32` |
+| `Link` | `0x30` | `48` |
+| `LinkServer` | `0x31` | `49` |
+| `BleClient` | `0x32` | `50` |
+| `BleServer` | `0x33` | `51` |
+| `Range` | `0x40` | `64` |
+| `Base` | `0x70` | `112` |
+| `ByScratch` | `0x80` | `128` |
+| `Scratch` | `0x81` | `129` |
+| `Entry` | `0x82` | `130` |
+| `Tester` | `0xA0` | `160` |
+| `Monitor` | `0xA1` | `161` |
+| `Updater` | `0xA2` | `162` |
+| `Encrypter` | `0xA3` | `163` |
+| `Whispering` | `0xFE` | `254` |
+| `Broadcasting` | `0xFF` | `255` |
+
+
+## DataType enum
+
+| Name | Hex | Dec |
+|---|---:|---:|
+| `None_` | `0x00` | `0` |
+| `Ping` | `0x01` | `1` |
+| `Ack` | `0x02` | `2` |
+| `Error` | `0x03` | `3` |
+| `Request` | `0x04` | `4` |
+| `Message` | `0x05` | `5` |
+| `Address` | `0x06` | `6` |
+| `Information` | `0x07` | `7` |
+| `Update` | `0x08` | `8` |
+| `UpdateLocation` | `0x09` | `9` |
+| `Encrypt` | `0x0A` | `10` |
+| `SystemCount` | `0x0B` | `11` |
+| `SystemInformation` | `0x0C` | `12` |
+| `Registration` | `0x0D` | `13` |
+| `Administrator` | `0x0E` | `14` |
+| `Monitor` | `0x0F` | `15` |
+| `Control` | `0x10` | `16` |
+| `Command` | `0x11` | `17` |
+| `Pairing` | `0x12` | `18` |
+| `Rssi` | `0x13` | `19` |
+| `TimeSync` | `0x14` | `20` |
+| `TransmissionPower` | `0x15` | `21` |
+| `Configuration` | `0x16` | `22` |
+| `Echo` | `0x17` | `23` |
+| `CpuID` | `0x1E` | `30` |
+| `Battle` | `0x1F` | `31` |
+| `LightManual` | `0x20` | `32` |
+| `LightMode` | `0x21` | `33` |
+| `LightEvent` | `0x22` | `34` |
+| `LightDefault` | `0x23` | `35` |
+| `RawMotion` | `0x30` | `48` |
+| `RawFlow` | `0x31` | `49` |
+| `State` | `0x40` | `64` |
+| `Attitude` | `0x41` | `65` |
+| `Position` | `0x42` | `66` |
+| `Altitude` | `0x43` | `67` |
+| `Motion` | `0x44` | `68` |
+| `Range` | `0x45` | `69` |
+| `Flow` | `0x46` | `70` |
+| `Count` | `0x50` | `80` |
+| `Bias` | `0x51` | `81` |
+| `Trim` | `0x52` | `82` |
+| `Weight` | `0x53` | `83` |
+| `LostConnection` | `0x54` | `84` |
+| `Motor` | `0x60` | `96` |
+| `MotorSingle` | `0x61` | `97` |
+| `Buzzer` | `0x62` | `98` |
+| `Vibrator` | `0x63` | `99` |
+| `Button` | `0x70` | `112` |
+| `Joystick` | `0x71` | `113` |
+| `DisplayClear` | `0x80` | `128` |
+| `DisplayInvert` | `0x81` | `129` |
+| `DisplayDrawPoint` | `0x82` | `130` |
+| `DisplayDrawLine` | `0x83` | `131` |
+| `DisplayDrawRect` | `0x84` | `132` |
+| `DisplayDrawCircle` | `0x85` | `133` |
+| `DisplayDrawString` | `0x86` | `134` |
+| `DisplayDrawStringAlign` | `0x87` | `135` |
+| `DisplayDrawImage` | `0x88` | `136` |
+| `CardClassify` | `0x90` | `144` |
+| `CardRange` | `0x91` | `145` |
+| `CardRaw` | `0x92` | `146` |
+| `CardColor` | `0x93` | `147` |
+| `CardList` | `0x94` | `148` |
+| `CardFunctionList` | `0x95` | `149` |
+| `InformationAssembledForController` | `0xA0` | `160` |
+| `InformationAssembledForEntry` | `0xA1` | `161` |
+| `InformationAssembledForByBlocks` | `0xA2` | `162` |
+| `NavigationTarget` | `0xD0` | `208` |
+| `NavigationLocation` | `0xD1` | `209` |
+| `NavigationMonitor` | `0xD2` | `210` |
+| `NavigationHeading` | `0xD3` | `211` |
+| `NavigationCounter` | `0xD4` | `212` |
+| `NavigationSatellite` | `0xD5` | `213` |
+| `NavigationLocationAdjust` | `0xD6` | `214` |
+| `NavigationTargetEcef` | `0xD8` | `216` |
+| `NavigationLocationEcef` | `0xD9` | `217` |
+| `GpsRtkNavigationState` | `0xDA` | `218` |
+| `GpsRtkExtendedRawMeasurementData` | `0xDB` | `219` |
+| `EndOfType` | `0xDC` | `220` |
+
+
+## Main payload structures
+
+| Payload class / packet kind | DataType | Header `to` | Payload bytes, little-endian | Size |
+|---|---:|---|---|---:|
+| `Command` | `0x11` | usually `Drone` | `[commandType:u8, option:u8]` | 2 |
+| `Request` | `0x04` | target device | `[requestedDataType:u8]` | 1 |
+| `Ping` | `0x01` | target device | `[systemTime:u64]` | 8 |
+| `Pairing` | `0x12` | target device | `[address0:u16, address1:u16, address2:u16, scramble:u8, channel0:u8, channel1:u8, channel2:u8, channel3:u8]` | 11 |
+| `ControlQuad8` | `0x10` | `Drone` | `[roll:i8, pitch:i8, yaw:i8, throttle:i8]` | 4 |
+| `ControlPosition` | `0x10` | `Drone` | `[positionX:f32, positionY:f32, positionZ:f32, velocity:f32, heading:i16, rotationalVelocity:i16]` | 20 |
+| `Trim` | `0x52` | `Drone` | `[roll:i16, pitch:i16, yaw:i16, throttle:i16]` | 8 |
+| `Weight` | `0x53` | `Drone` | `[weight:f32]` | 4 |
+| `LostConnection` | `0x54` | `Drone` | `[timeNeutral:u16, timeLanding:u16, timeStop:u32]` | 8 |
+| `Motor` | `0x60` | `Drone` | `[motor0:u16, motor1:u16, motor2:u16, motor3:u16]` | 8 |
+| `MotorSingle` | `0x61` | `Drone` | `[target:u8, value:u16]` | 3 |
+| `LightManual` | `0x20` | `Drone` or `Controller` | `[flags:u16, brightness:u8]` | 3 |
+| `LightModeColor` | `0x21` | `Drone` or `Controller` | `[mode:u8, interval:u16, r:u8, g:u8, b:u8]` | 6 |
+| `LightModeColors` | `0x21` | `Drone` or `Controller` | `[mode:u8, interval:u16, colors:u8]` | 4 |
+| `LightEventColor` | `0x22` | `Drone` or `Controller` | `[event:u8, interval:u16, repeat:u8, r:u8, g:u8, b:u8]` | 7 |
+| `LightEventColors` | `0x22` | `Drone` or `Controller` | `[event:u8, interval:u16, repeat:u8, colors:u8]` | 5 |
+| `LightDefaultColor` | `0x23` | `Drone` or `Controller` | same as `LightModeColor` | 6 |
+| `Buzzer` | `0x62` | `Drone` or `Controller` | `[mode:u8, value:u16, time:u16]` | 5 |
+| `Vibrator` | `0x63` | `Controller` | `[mode:u8, on:u16, off:u16, total:u16]` | 7 |
+| `DisplayClearAll` | `0x80` | `Controller` | `[pixel:u8]` | 1 |
+| `DisplayClear` | `0x80` | `Controller` | `[x:i16, y:i16, width:i16, height:i16, pixel:u8]` | 9 |
+| `DisplayInvert` | `0x81` | `Controller` | `[x:i16, y:i16, width:i16, height:i16]` | 8 |
+| `DisplayDrawPoint` | `0x82` | `Controller` | `[x:i16, y:i16, pixel:u8]` | 5 |
+| `DisplayDrawLine` | `0x83` | `Controller` | `[x1:i16, y1:i16, x2:i16, y2:i16, pixel:u8, line:u8]` | 10 |
+| `DisplayDrawRect` | `0x84` | `Controller` | `[x:i16, y:i16, width:i16, height:i16, pixel:u8, flagFill:u8/bool, line:u8]` | 11 |
+| `DisplayDrawCircle` | `0x85` | `Controller` | `[x:i16, y:i16, radius:i16, pixel:u8, flagFill:u8/bool]` | 8 |
+| `DisplayDrawString` | `0x86` | `Controller` | `[x:i16, y:i16, font:u8, pixel:u8, ascii...]` | `6 + len` |
+| `DisplayDrawStringAlign` | `0x87` | `Controller` | `[xStart:i16, xEnd:i16, y:i16, align:u8, font:u8, pixel:u8, ascii...]` | `9 + len` |
+
+## CommandType enum
+
+`DataType.Command` uses payload `[commandType, option]`.
+
+| Name | Hex | Dec |
+|---|---:|---:|
+| `None_` | `0x00` | `0` |
+| `Stop` | `0x01` | `1` |
+| `ModeControlFlight` | `0x02` | `2` |
+| `Headless` | `0x03` | `3` |
+| `ControlSpeed` | `0x04` | `4` |
+| `ClearBias` | `0x05` | `5` |
+| `ClearTrim` | `0x06` | `6` |
+| `FlightEvent` | `0x07` | `7` |
+| `SetDefault` | `0x08` | `8` |
+| `Backlight` | `0x09` | `9` |
+| `ModeController` | `0x0A` | `10` |
+| `Link` | `0x0B` | `11` |
+| `ClearCounter` | `0xA0` | `160` |
+| `NavigationTargetClear` | `0xE0` | `224` |
+| `NavigationStart` | `0xE1` | `225` |
+| `NavigationPause` | `0xE2` | `226` |
+| `NavigationRestart` | `0xE3` | `227` |
+| `NavigationStop` | `0xE4` | `228` |
+| `NavigationNext` | `0xE5` | `229` |
+| `NavigationReturnToHome` | `0xE6` | `230` |
+| `GpsRtkBase` | `0xEA` | `234` |
+| `GpsRtkRover` | `0xEB` | `235` |
+| `EndOfType` | `0xEC` | `236` |
+
+
+## Command packet template
+
+For most drone commands:
+
+```text
+0A 55 11 02 70 10 <commandType> <option> <crcLow> <crcHigh>
+```
+
+Where:
+
+- `11` = `DataType.Command`
+- `02` = payload length
+- `70` = `DeviceType.Base`
+- `10` = `DeviceType.Drone`
+
+## CommandType packet notes
+
+| CommandType | Byte | Option meaning | Example packet |
+|---|---:|---|---|
+| `None_` | `0x00` | option depends on command | `0A 55 11 02 70 10 00 00 B1 1A` |
+| `Stop` | `0x01` | option depends on command | `0A 55 11 02 70 10 01 00 80 29` |
+| `ModeControlFlight` | `0x02` | option depends on command | `depends on option` |
+| `Headless` | `0x03` | option depends on command | `depends on option` |
+| `ControlSpeed` | `0x04` | option depends on command | `depends on option` |
+| `ClearBias` | `0x05` | option depends on command | `0A 55 11 02 70 10 05 00 44 E5` |
+| `ClearTrim` | `0x06` | option depends on command | `0A 55 11 02 70 10 06 00 17 B0` |
+| `FlightEvent` | `0x07` | option depends on command | `depends on option` |
+| `SetDefault` | `0x08` | option depends on command | `0A 55 11 02 70 10 08 00 18 93` |
+| `Backlight` | `0x09` | option depends on command | `depends on option` |
+| `ModeController` | `0x0A` | option depends on command | `depends on option` |
+| `Link` | `0x0B` | option depends on command | `depends on option` |
+| `ClearCounter` | `0xA0` | option depends on command | `0A 55 11 02 70 10 A0 00 CF 07` |
+| `NavigationTargetClear` | `0xE0` | option depends on command | `0A 55 11 02 70 10 E0 00 03 0A` |
+| `NavigationStart` | `0xE1` | option depends on command | `0A 55 11 02 70 10 E1 00 32 39` |
+| `NavigationPause` | `0xE2` | option depends on command | `0A 55 11 02 70 10 E2 00 61 6C` |
+| `NavigationRestart` | `0xE3` | option depends on command | `0A 55 11 02 70 10 E3 00 50 5F` |
+| `NavigationStop` | `0xE4` | option depends on command | `0A 55 11 02 70 10 E4 00 C7 C6` |
+| `NavigationNext` | `0xE5` | option depends on command | `0A 55 11 02 70 10 E5 00 F6 F5` |
+| `NavigationReturnToHome` | `0xE6` | option depends on command | `0A 55 11 02 70 10 E6 00 A5 A0` |
+| `GpsRtkBase` | `0xEA` | option depends on command | `0A 55 11 02 70 10 EA 00 C8 E5` |
+| `GpsRtkRover` | `0xEB` | option depends on command | `0A 55 11 02 70 10 EB 00 F9 D6` |
+
+
+## FlightEvent options and full packets
+
+These are `CommandType.FlightEvent` (`0x07`) with different `option` values.
+
+| FlightEvent option | Option byte | Full Command packet to Drone |
+|---|---:|---|
+| `None_` | `0x00` | `0A 55 11 02 70 10 07 00 26 83` |
+| `Stop` | `0x10` | `0A 55 11 02 70 10 07 10 17 91` |
+| `TakeOff` | `0x11` | `0A 55 11 02 70 10 07 11 36 81` |
+| `Landing` | `0x12` | `0A 55 11 02 70 10 07 12 55 B1` |
+| `Reverse` | `0x13` | `0A 55 11 02 70 10 07 13 74 A1` |
+| `FlipFront` | `0x14` | `0A 55 11 02 70 10 07 14 93 D1` |
+| `FlipRear` | `0x15` | `0A 55 11 02 70 10 07 15 B2 C1` |
+| `FlipLeft` | `0x16` | `0A 55 11 02 70 10 07 16 D1 F1` |
+| `FlipRight` | `0x17` | `0A 55 11 02 70 10 07 17 F0 E1` |
+| `Return` | `0x18` | `0A 55 11 02 70 10 07 18 1F 10` |
+| `Shot` | `0x90` | `0A 55 11 02 70 10 07 90 9F 00` |
+| `UnderAttack` | `0x91` | `0A 55 11 02 70 10 07 91 BE 10` |
+| `ResetHeading` | `0xA0` | `0A 55 11 02 70 10 07 A0 CC 36` |
+
+
+## Exact packet examples
+
+| Example | Full packet bytes |
+|---|---|
+| Stop command | `0A 55 11 02 70 10 01 00 80 29` |
+| Takeoff | `0A 55 11 02 70 10 07 11 36 81` |
+| Landing | `0A 55 11 02 70 10 07 12 55 B1` |
+| Reset heading | `0A 55 11 02 70 10 07 A0 CC 36` |
+| Control: roll=0 pitch=30 yaw=0 throttle=0 | `0A 55 10 04 70 10 00 1E 00 00 D6 E5` |
+| Control: all zeros / neutral | `0A 55 10 04 70 10 00 00 00 00 B4 BD` |
+| Request drone State | `0A 55 04 01 70 10 40 0D 6C` |
+| Motor: all motors value 100 | `0A 55 60 08 70 10 64 00 64 00 64 00 64 00 B0 12` |
+| MotorSingle: target=0 value=100 | `0A 55 61 03 70 10 00 64 00 54 04` |
+| Controller buzzer: 440 Hz for 300 ms | `0A 55 62 05 70 20 05 B8 01 2C 01 4A F4` |
+
+
+## Movement/control packets
+
+### `ControlQuad8`
+
+Payload:
+
+```text
+[roll:i8, pitch:i8, yaw:i8, throttle:i8]
+```
+
+Packet template:
+
+```text
+0A 55 10 04 70 10 <roll> <pitch> <yaw> <throttle> <crcLow> <crcHigh>
+```
+
+TypeScript:
+
+```ts
+function controlQuad8(roll: number, pitch: number, yaw: number, throttle: number) {
+  return packet(0x10, 0x10, [i8(roll), i8(pitch), i8(yaw), i8(throttle)]);
+}
+
+// same as Python sendControl(0, 30, 0, 0)
+const forward = controlQuad8(0, 30, 0, 0);
+```
+
+### `ControlPosition`
+
+Payload:
+
+```text
+[positionX:f32, positionY:f32, positionZ:f32, velocity:f32, heading:i16, rotationalVelocity:i16]
+```
+
+TypeScript:
+
+```ts
+function controlPosition(
+  positionX: number,
+  positionY: number,
+  positionZ: number,
+  velocity: number,
+  heading: number,
+  rotationalVelocity: number,
+) {
+  return packet(0x10, 0x10, [
+    ...f32le(positionX),
+    ...f32le(positionY),
+    ...f32le(positionZ),
+    ...f32le(velocity),
+    ...i16le(heading),
+    ...i16le(rotationalVelocity),
+  ]);
+}
+```
+
+## Low-level raw motor control packets
+
+These are source-derived packet formats from the Python package. They are **not just diagnostic packets**: the library exposes them as low-level motor output commands. They directly encode motor output values, but they are still **not** a flight stabilizer. Raw motor hover requires your own feedback loop for roll, pitch, yaw, and altitude.
+
+### `Motor`
+
+`sendMotor(motor0, motor1, motor2, motor3)` uses:
+
+```text
+DataType.Motor = 0x60
+Payload = [motor0:u16, motor1:u16, motor2:u16, motor3:u16]
+```
+
+Packet template:
+
+```text
+0A 55 60 08 70 10 <m0:u16le> <m1:u16le> <m2:u16le> <m3:u16le> <crcLow> <crcHigh>
+```
+
+The library wrapper `set_motor_speed(front_right, back_right, back_left, front_left)` sends them in this order:
+
+```text
+motor0 = front_right
+motor1 = back_right
+motor2 = back_left
+motor3 = front_left
+```
+
+For a custom hover controller, this is the packet family you would generate after calculating four motor outputs from your own stabilization loop. The packet itself does no balancing. It just sends the four output values.
+
+TypeScript encoder:
+
+```ts
+function motorPacket(frontRight: number, backRight: number, backLeft: number, frontLeft: number) {
+  return packet(0x60, 0x10, [
+    ...u16le(frontRight),
+    ...u16le(backRight),
+    ...u16le(backLeft),
+    ...u16le(frontLeft),
+  ]);
+}
+```
+
+### `MotorSingle`
+
+```text
+DataType.MotorSingle = 0x61
+Payload = [target:u8, value:u16]
+```
+
+TypeScript encoder:
+
+```ts
+function motorSinglePacket(target: number, value: number) {
+  return packet(0x61, 0x10, [target & 0xff, ...u16le(value)]);
+}
+```
+
+## Setup/config packets
+
+| Python method | Packet |
+|---|---|
+| `sendModeControlFlight(mode)` | `CommandType.ModeControlFlight` (`0x02`), option = `ModeControlFlight` value |
+| `sendHeadless(headless)` | `CommandType.Headless` (`0x03`), option = `Headless` value |
+| `speed_change(level)` / `sendCommand(ControlSpeed, level)` | `CommandType.ControlSpeed` (`0x04`), option = speed level |
+| `sendClearBias()` | `CommandType.ClearBias` (`0x05`), option `0` |
+| `sendClearTrim()` | `CommandType.ClearTrim` (`0x06`), option `0`, source `Tester` (`0xA0`) |
+| `sendSetDefault(deviceType)` | `CommandType.SetDefault` (`0x08`), option `0` |
+| `sendBacklight(bool)` | `CommandType.Backlight` (`0x09`), option `0/1`, target `Controller` |
+| `sendControlleLinkMode()` | `CommandType.ModeController` (`0x0A`), option `0x80`, target `Controller` |
+
+### ModeControlFlight
+
+| Name | Hex | Dec |
+|---|---:|---:|
+| `None_` | `0x00` | `0` |
+| `Attitude` | `0x10` | `16` |
+| `Position` | `0x11` | `17` |
+| `Manual` | `0x12` | `18` |
+| `Rate` | `0x13` | `19` |
+| `Function` | `0x14` | `20` |
+| `EndOfType` | `0x15` | `21` |
+
+
+### Headless
+
+| Name | Hex | Dec |
+|---|---:|---:|
+| `None_` | `0x00` | `0` |
+| `Headless` | `0x01` | `1` |
+| `Normal` | `0x02` | `2` |
+| `EndOfType` | `0x03` | `3` |
+
+
+## Lights
+
+### LightModeDrone
+
+| Name | Hex | Dec |
+|---|---:|---:|
+| `None_` | `0x00` | `0` |
+| `RearNone` | `0x10` | `16` |
+| `RearManual` | `0x11` | `17` |
+| `RearHold` | `0x12` | `18` |
+| `RearFlicker` | `0x13` | `19` |
+| `RearFlickerDouble` | `0x14` | `20` |
+| `RearDimming` | `0x15` | `21` |
+| `RearSunrise` | `0x16` | `22` |
+| `RearSunset` | `0x17` | `23` |
+| `BodyNone` | `0x20` | `32` |
+| `BodyManual` | `0x21` | `33` |
+| `BodyHold` | `0x22` | `34` |
+| `BodyFlicker` | `0x23` | `35` |
+| `BodyFlickerDouble` | `0x24` | `36` |
+| `BodyDimming` | `0x25` | `37` |
+| `BodySunrise` | `0x26` | `38` |
+| `BodySunset` | `0x27` | `39` |
+| `BodyRainbow` | `0x28` | `40` |
+| `BodyRainbow2` | `0x29` | `41` |
+| `ANone` | `0x30` | `48` |
+| `AManual` | `0x31` | `49` |
+| `AHold` | `0x32` | `50` |
+| `AFlicker` | `0x33` | `51` |
+| `AFlickerDouble` | `0x34` | `52` |
+| `ADimming` | `0x35` | `53` |
+| `ASunrise` | `0x36` | `54` |
+| `ASunset` | `0x37` | `55` |
+| `BNone` | `0x40` | `64` |
+| `BManual` | `0x41` | `65` |
+| `BHold` | `0x42` | `66` |
+| `BFlicker` | `0x43` | `67` |
+| `BFlickerDouble` | `0x44` | `68` |
+| `BDimming` | `0x45` | `69` |
+| `BSunrise` | `0x46` | `70` |
+| `BSunset` | `0x47` | `71` |
+| `EndOfType` | `0x60` | `96` |
+
+
+### LightModeController
+
+| Name | Hex | Dec |
+|---|---:|---:|
+| `None_` | `0x00` | `0` |
+| `BodyNone` | `0x20` | `32` |
+| `BodyManual` | `0x21` | `33` |
+| `BodyHold` | `0x22` | `34` |
+| `BodyFlicker` | `0x23` | `35` |
+| `BodyFlickerDouble` | `0x24` | `36` |
+| `BodyDimming` | `0x25` | `37` |
+| `BodySunrise` | `0x26` | `38` |
+| `BodySunset` | `0x27` | `39` |
+| `BodyRainbow` | `0x28` | `40` |
+| `BodyRainbow2` | `0x29` | `41` |
+| `EndOfType` | `0x30` | `48` |
+
+
+### Colors
+
+| Name | Hex | Dec |
+|---|---:|---:|
+| `AliceBlue` | `0x00` | `0` |
+| `AntiqueWhite` | `0x01` | `1` |
+| `Aqua` | `0x02` | `2` |
+| `Aquamarine` | `0x03` | `3` |
+| `Azure` | `0x04` | `4` |
+| `Beige` | `0x05` | `5` |
+| `Bisque` | `0x06` | `6` |
+| `Black` | `0x07` | `7` |
+| `BlanchedAlmond` | `0x08` | `8` |
+| `Blue` | `0x09` | `9` |
+| `BlueViolet` | `0x0A` | `10` |
+| `Brown` | `0x0B` | `11` |
+| `BurlyWood` | `0x0C` | `12` |
+| `CadetBlue` | `0x0D` | `13` |
+| `Chartreuse` | `0x0E` | `14` |
+| `Chocolate` | `0x0F` | `15` |
+| `Coral` | `0x10` | `16` |
+| `CornflowerBlue` | `0x11` | `17` |
+| `Cornsilk` | `0x12` | `18` |
+| `Crimson` | `0x13` | `19` |
+| `Cyan` | `0x14` | `20` |
+| `DarkBlue` | `0x15` | `21` |
+| `DarkCyan` | `0x16` | `22` |
+| `DarkGoldenRod` | `0x17` | `23` |
+| `DarkGray` | `0x18` | `24` |
+| `DarkGreen` | `0x19` | `25` |
+| `DarkKhaki` | `0x1A` | `26` |
+| `DarkMagenta` | `0x1B` | `27` |
+| `DarkOliveGreen` | `0x1C` | `28` |
+| `DarkOrange` | `0x1D` | `29` |
+| `DarkOrchid` | `0x1E` | `30` |
+| `DarkRed` | `0x1F` | `31` |
+| `DarkSalmon` | `0x20` | `32` |
+| `DarkSeaGreen` | `0x21` | `33` |
+| `DarkSlateBlue` | `0x22` | `34` |
+| `DarkSlateGray` | `0x23` | `35` |
+| `DarkTurquoise` | `0x24` | `36` |
+| `DarkViolet` | `0x25` | `37` |
+| `DeepPink` | `0x26` | `38` |
+| `DeepSkyBlue` | `0x27` | `39` |
+| `DimGray` | `0x28` | `40` |
+| `DodgerBlue` | `0x29` | `41` |
+| `FireBrick` | `0x2A` | `42` |
+| `FloralWhite` | `0x2B` | `43` |
+| `ForestGreen` | `0x2C` | `44` |
+| `Fuchsia` | `0x2D` | `45` |
+| `Gainsboro` | `0x2E` | `46` |
+| `GhostWhite` | `0x2F` | `47` |
+| `Gold` | `0x30` | `48` |
+| `GoldenRod` | `0x31` | `49` |
+| `Gray` | `0x32` | `50` |
+| `Green` | `0x33` | `51` |
+| `GreenYellow` | `0x34` | `52` |
+| `HoneyDew` | `0x35` | `53` |
+| `HotPink` | `0x36` | `54` |
+| `IndianRed` | `0x37` | `55` |
+| `Indigo` | `0x38` | `56` |
+| `Ivory` | `0x39` | `57` |
+| `Khaki` | `0x3A` | `58` |
+| `Lavender` | `0x3B` | `59` |
+| `LavenderBlush` | `0x3C` | `60` |
+| `LawnGreen` | `0x3D` | `61` |
+| `LemonChiffon` | `0x3E` | `62` |
+| `LightBlue` | `0x3F` | `63` |
+| `LightCoral` | `0x40` | `64` |
+| `LightCyan` | `0x41` | `65` |
+| `LightGoldenRodYellow` | `0x42` | `66` |
+| `LightGray` | `0x43` | `67` |
+| `LightGreen` | `0x44` | `68` |
+| `LightPink` | `0x45` | `69` |
+| `LightSalmon` | `0x46` | `70` |
+| `LightSeaGreen` | `0x47` | `71` |
+| `LightSkyBlue` | `0x48` | `72` |
+| `LightSlateGray` | `0x49` | `73` |
+| `LightSteelBlue` | `0x4A` | `74` |
+| `LightYellow` | `0x4B` | `75` |
+| `Lime` | `0x4C` | `76` |
+| `LimeGreen` | `0x4D` | `77` |
+| `Linen` | `0x4E` | `78` |
+| `Magenta` | `0x4F` | `79` |
+| `Maroon` | `0x50` | `80` |
+| `MediumAquaMarine` | `0x51` | `81` |
+| `MediumBlue` | `0x52` | `82` |
+| `MediumOrchid` | `0x53` | `83` |
+| `MediumPurple` | `0x54` | `84` |
+| `MediumSeaGreen` | `0x55` | `85` |
+| `MediumSlateBlue` | `0x56` | `86` |
+| `MediumSpringGreen` | `0x57` | `87` |
+| `MediumTurquoise` | `0x58` | `88` |
+| `MediumVioletRed` | `0x59` | `89` |
+| `MidnightBlue` | `0x5A` | `90` |
+| `MintCream` | `0x5B` | `91` |
+| `MistyRose` | `0x5C` | `92` |
+| `Moccasin` | `0x5D` | `93` |
+| `NavajoWhite` | `0x5E` | `94` |
+| `Navy` | `0x5F` | `95` |
+| `OldLace` | `0x60` | `96` |
+| `Olive` | `0x61` | `97` |
+| `OliveDrab` | `0x62` | `98` |
+| `Orange` | `0x63` | `99` |
+| `OrangeRed` | `0x64` | `100` |
+| `Orchid` | `0x65` | `101` |
+| `PaleGoldenRod` | `0x66` | `102` |
+| `PaleGreen` | `0x67` | `103` |
+| `PaleTurquoise` | `0x68` | `104` |
+| `PaleVioletRed` | `0x69` | `105` |
+| `PapayaWhip` | `0x6A` | `106` |
+| `PeachPuff` | `0x6B` | `107` |
+| `Peru` | `0x6C` | `108` |
+| `Pink` | `0x6D` | `109` |
+| `Plum` | `0x6E` | `110` |
+| `PowderBlue` | `0x6F` | `111` |
+| `Purple` | `0x70` | `112` |
+| `RebeccaPurple` | `0x71` | `113` |
+| `Red` | `0x72` | `114` |
+| `RosyBrown` | `0x73` | `115` |
+| `RoyalBlue` | `0x74` | `116` |
+| `SaddleBrown` | `0x75` | `117` |
+| `Salmon` | `0x76` | `118` |
+| `SandyBrown` | `0x77` | `119` |
+| `SeaGreen` | `0x78` | `120` |
+| `SeaShell` | `0x79` | `121` |
+| `Sienna` | `0x7A` | `122` |
+| `Silver` | `0x7B` | `123` |
+| `SkyBlue` | `0x7C` | `124` |
+| `SlateBlue` | `0x7D` | `125` |
+| `SlateGray` | `0x7E` | `126` |
+| `Snow` | `0x7F` | `127` |
+| `SpringGreen` | `0x80` | `128` |
+| `SteelBlue` | `0x81` | `129` |
+| `Tan` | `0x82` | `130` |
+| `Teal` | `0x83` | `131` |
+| `Thistle` | `0x84` | `132` |
+| `Tomato` | `0x85` | `133` |
+| `Turquoise` | `0x86` | `134` |
+| `Violet` | `0x87` | `135` |
+| `Wheat` | `0x88` | `136` |
+| `White` | `0x89` | `137` |
+| `WhiteSmoke` | `0x8A` | `138` |
+| `Yellow` | `0x8B` | `139` |
+| `YellowGreen` | `0x8C` | `140` |
+| `EndOfType` | `0x8D` | `141` |
+
+
+## Sounds
+
+### BuzzerMode
+
+| Name | Hex | Dec |
+|---|---:|---:|
+| `Stop` | `0x00` | `0` |
+| `Mute` | `0x01` | `1` |
+| `MuteReserve` | `0x02` | `2` |
+| `Scale` | `0x03` | `3` |
+| `ScaleReserve` | `0x04` | `4` |
+| `Hz` | `0x05` | `5` |
+| `HzReserve` | `0x06` | `6` |
+| `EndOfType` | `0x07` | `7` |
+
+
+`Buzzer` packet:
+
+```text
+0A 55 62 05 70 <to> <mode:u8> <value:u16le> <time:u16le> <crcLow> <crcHigh>
+```
+
+- `to=0x10` sends to drone buzzer.
+- `to=0x20` sends to controller buzzer.
+- `mode=0x05` means Hz now.
+- `mode=0x03` means musical scale/note now.
+
+## Display/controller screen enums
+
+### DisplayPixel
+
+| Name | Hex | Dec |
+|---|---:|---:|
+| `Black` | `0x00` | `0` |
+| `White` | `0x01` | `1` |
+| `Inverse` | `0x02` | `2` |
+| `Outline` | `0x03` | `3` |
+
+
+### DisplayFont
+
+| Name | Hex | Dec |
+|---|---:|---:|
+| `LiberationMono5x8` | `0x00` | `0` |
+| `LiberationMono10x16` | `0x01` | `1` |
+
+
+### DisplayAlign
+
+| Name | Hex | Dec |
+|---|---:|---:|
+| `Left` | `0x00` | `0` |
+| `Center` | `0x01` | `1` |
+| `Right` | `0x02` | `2` |
+
+
+### DisplayLine
+
+| Name | Hex | Dec |
+|---|---:|---:|
+| `Solid` | `0x00` | `0` |
+| `Dotted` | `0x01` | `1` |
+| `Dashed` | `0x02` | `2` |
+
+
+## Request/read packets
+
+The source uses `sendRequest(deviceType, dataType)` for telemetry. Payload is just the requested `DataType` byte.
+
+Template:
+
+```text
+0A 55 04 01 70 <targetDevice> <requestedDataType> <crcLow> <crcHigh>
+```
+
+Examples:
+
+| Request | Bytes |
+|---|---|
+| Drone state | `0A 55 04 01 70 10 40 0D 6C` |
+| Drone altitude | `0A 55 04 01 70 10 43 6E 5C` |
+| Drone range sensors | `0A 55 04 01 70 10 45 A8 3C` |
+| Controller joystick | `0A 55 04 01 70 20 71 EA 4F` |
+| Controller button | `0A 55 04 01 70 20 70 CB 5F` |
+
+## What I did not verify
+
+- I did **not** connect to a physical CoDrone EDU controller.
+- I did **not** sniff USB traffic. This is source-derived from the public Python wheel.
+- Firmware may reject some low-level commands depending on mode/state.
+- Raw motor command ranges are documented in a Python docstring as `0-1000`. This appears to be the intended low-level motor output range, but arbitrary values still will not produce stable flight without a control loop.
+
+## Practical browser send shape
+
+```ts
+async function send(port: SerialPort, bytes: Uint8Array) {
+  const writer = port.writable!.getWriter();
+  try {
+    await writer.write(bytes);
+  } finally {
+    writer.releaseLock();
+  }
+}
+
+// Example: neutral control packet
+await send(port, controlQuad8(0, 0, 0, 0));
+```
