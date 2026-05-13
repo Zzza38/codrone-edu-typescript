@@ -1,6 +1,6 @@
 {
   "name": "codrone-edu-typescript",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "description": "Browser TypeScript Web Serial API for CoDrone EDU drones.",
   "type": "module",
   "packageManager": "pnpm@10.33.2",
